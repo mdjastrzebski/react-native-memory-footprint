@@ -15,7 +15,6 @@ npm install react-native-memory-footprint
 ```js
 import { getMemoryFootprint } from 'react-native-memory-footprint';
 
-// Current app memory footprint, in bytes.
 const bytes = getMemoryFootprint();
 console.log(`${(bytes / 1024 / 1024).toFixed(2)} MB`);
 ```
@@ -29,7 +28,7 @@ Returns the current memory footprint of the app process, in bytes.
 | Platform | Underlying metric |
 | --- | --- |
 | iOS | `phys_footprint` from `task_info(TASK_VM_INFO)` — the same value shown in Xcode's memory gauge and used by Jetsam |
-| Android | Total PSS (proportional set size) of the process, from `Debug.getMemoryInfo()` |
+| Android | Anonymous RSS + swap (`RssAnon` + `VmSwap` from `/proc/self/status`) — the same metric behind Play Console's "excessive memory usage" vitals |
 
 ## How iOS memory footprint is calculated
 
@@ -71,28 +70,38 @@ So when reconciling against VM Tracker:
 
 ## How Android memory footprint is calculated
 
-On Android, `getMemoryFootprint()` returns **total PSS** (Proportional Set Size) via [`Debug.getMemoryInfo()`](https://developer.android.com/reference/android/os/Debug.MemoryInfo) — the same source `dumpsys meminfo` uses. Per the [Android memory overview](https://developer.android.com/topic/performance/memory-overview):
+Android doesn't have one canonical "memory footprint" metric the way iOS has `phys_footprint` — the term gets used loosely across its docs for at least three different measurements. Per the [Android memory management guide](https://developer.android.com/topic/performance/memory-management):
 
-> Android computes a value called the Proportional Set Size (PSS), which accounts for both dirty and clean pages that are shared with other processes — but only in an amount that's proportional to how many apps share that RAM. This (PSS) total is what the system considers to be your physical memory footprint.
+> To determine the memory footprint for an application, any of the following metrics may be used:
+> - **Resident Set Size (RSS)**: The number of shared and non-shared pages used by the app
+> - **Proportional Set Size (PSS)**: The number of non-shared pages used by the app and an even distribution of the shared pages (for example, if three processes are sharing 3MB, each process gets 1MB in PSS)
+> - **Unique Set Size (USS)**: The number of non-shared pages used by the app (shared pages are not included)
+>
+> PSS is useful for the operating system when it wants to know how much memory is used by all processes since pages don't get counted multiple times.
 
-So a 4K page shared evenly across two processes contributes 2K to each process's PSS. That proportional split is what makes PSS additive: sum the PSS of every process on the device and you get actual physical RAM in use, which is why the platform (and `dumpsys meminfo`) treats it as *the* number for a process's real weight — the direct Android analogue of iOS's `phys_footprint`.
+`getMemoryFootprint()` reports **anonymous RSS + swap**: resident anonymous memory plus anonymous memory the compressor/swap has moved out of residency. This is the same metric behind Android vitals' "excessive memory usage" warning in Play Console. Per the [Play Vitals memory usage doc](https://developer.android.com/topic/performance/vitals/memory-usage):
 
-This is a genuinely different calculation from **RSS** (Resident Set Size), which counts the *full* size of every shared page for every process that maps it — RSS is not additive across processes, and inflates for anything sharing memory with the system (Zygote-inherited ART boot image, shared native libraries, etc.).
+> Anonymous memory is memory not backed by a file on storage, such as heap allocations and mmap-allocated memory. This captures your app's dynamic memory allocations, including the Java or Kotlin heap, unmanaged native heap allocations ..., and thread execution stacks. While the OS can drop file-backed memory under pressure, it can't drop anonymous memory. [...] Tracking anonymous RSS + swap ensures you see your app's true, unevictable memory footprint.
 
-That distinction matters if you're cross-checking against Android Studio's newer **Live Telemetry → Process Memory** view: per the [chart glossary](https://developer.android.com/studio/profile/chart-glossary/process-memory), its `Total` is explicitly RSS, not PSS:
+This is a deliberately different choice from PSS. PSS's proportional accounting exists so the system can add PSS across every process on the device without double-counting shared pages — useful for system-wide RAM bookkeeping, but not for judging whether *your* app is heavy or at risk of being killed. Android's low-memory killer daemon doesn't consult PSS at all when picking a victim: per the [AOSP `lmkd` source](https://android.googlesource.com/platform/system/memory/lmkd/+/master/lmkd.cpp), its `proc_get_size()` function reads RSS straight from `/proc/[pid]/statm`, and `proc_get_heaviest()` kills whichever eligible process has the largest RSS. Anonymous RSS + swap is the closer analogue to what actually determines memory pressure risk, and to iOS's `phys_footprint` (dirty + compressed, excluding evictable/shared memory).
 
-> This is the total amount of physical memory in use by your process. On Unix-based systems, this is known as the "Resident Set Size" ... sourced from `/proc/[pid]/stat`.
+### Where the numbers come from
 
-In principle RSS should read *higher* than PSS, since it counts shared pages in full rather than proportionally. In practice, for a typical React Native app the shared portion of RSS (mostly the ART boot image and a handful of system `.so` mappings inherited from Zygote) is small and roughly constant, so RSS and PSS often converge closely at runtime — which is consistent with what you're seeing lining up almost exactly against Live Telemetry's `Total`. Don't take that as a guarantee: on a device/OS combination with heavier shared-memory use, expect RSS to run visibly above PSS.
+`getMemoryFootprint()` reads `RssAnon` and `VmSwap` directly from `/proc/self/status`. Per the kernel's [`proc_pid_status(5)` man page](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html):
 
-**Bottom line:** treat `totalPss` (what this library reports) as ground truth — it's the metric Android itself defines as your app's physical footprint. Live Telemetry's `Total` (RSS) is a useful live chart, but it's answering a related, not identical, question.
+> **RssAnon**: Size of resident anonymous memory. (since Linux 4.5)
+>
+> **VmSwap**: Swapped-out virtual memory size by anonymous private pages; shmem swap usage is not included (since Linux 2.6.34).
+
+Reading `/proc/self/status` is a single small file read with no IPC and no permission requirements (you're only ever reading your own process). That makes it considerably cheaper than the PSS-based alternative, `Debug.getMemoryInfo()`, which the library used before switching to this metric — that call walks your process's `/proc/self/smaps` to compute page-sharing and [takes on the order of 200ms](https://eng.lyft.com/detecting-android-memory-leaks-in-production-29e9c97e2ba1) per invocation. (A separate API, `ActivityManager.getProcessMemoryInfo()`, is throttled by the system to once per 5 minutes per process — see the [AOSP throttling commit](https://android.googlesource.com/platform/frameworks/base/+/8c76d91bd21135f63ef5e8756b1a2e342e81413f) — but that throttle doesn't apply to `Debug.getMemoryInfo()` itself.)
 
 ### Further reading
 
-- [Android memory overview](https://developer.android.com/topic/performance/memory-overview) — official PSS definition ("This total is what the system considers to be your physical memory footprint")
-- [Android Studio chart glossary — Process memory (RSS)](https://developer.android.com/studio/profile/chart-glossary/process-memory) — what Live Telemetry's `Total` actually measures
-- [`Debug.MemoryInfo`](https://developer.android.com/reference/android/os/Debug.MemoryInfo) — API reference (see `getTotalPss()`)
-- [Proportional set size (Wikipedia)](https://en.wikipedia.org/wiki/Proportional_set_size) — general background on the PSS accounting model
+- [Android memory management guide](https://developer.android.com/topic/performance/memory-management) — RSS vs. PSS vs. USS
+- [Memory usage (anonymous RSS + swap) — Play Vitals](https://developer.android.com/topic/performance/vitals/memory-usage) — official definition of the metric this library reports
+- [`proc_pid_status(5)` man page](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html) — `RssAnon` / `VmSwap` field definitions
+- [AOSP `lmkd` source — `proc_get_size()`](https://android.googlesource.com/platform/system/memory/lmkd/+/master/lmkd.cpp) — confirms kill decisions use RSS, not PSS
+- [Detecting Android memory leaks in production (Lyft Engineering)](https://eng.lyft.com/detecting-android-memory-leaks-in-production-29e9c97e2ba1) — cost of `Debug.getMemoryInfo()` / `Debug.getPss()`
 
 ## Contributing
 

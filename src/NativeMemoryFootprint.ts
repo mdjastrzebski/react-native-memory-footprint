@@ -6,7 +6,9 @@ export interface Spec extends TurboModule {
    *
    * - iOS: `phys_footprint` from `TASK_VM_INFO` (the value Xcode's memory
    *   gauge and Jetsam use).
-   * - Android: total PSS (proportional set size) of the process.
+   * - Android: anonymous RSS + swap (`RssAnon` + `VmSwap` from
+   *   `/proc/self/status`) — the same metric Play Console's "excessive
+   *   memory usage" vitals use.
    */
   getMemoryFootprint(): number;
 }
