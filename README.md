@@ -28,10 +28,10 @@ console.log(`${(bytes / 1024 / 1024).toFixed(2)} MB`);
 
 Returns the current memory footprint of the app process, in bytes.
 
-| Platform | Underlying metric |
-| --- | --- |
-| iOS | `phys_footprint` from `task_info(TASK_VM_INFO)`, the same value shown in Xcode's memory gauge and used by [Jetsam](https://developer.apple.com/documentation/xcode/identifying-high-memory-use-with-jetsam-event-reports) |
-| Android | Anonymous RSS + swap (`RssAnon` + `VmSwap` from `/proc/self/status`), the same metric behind Play Console's "excessive memory usage" vitals |
+| Platform | Underlying metric                                                                                                                                                                                                         |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| iOS      | `phys_footprint` from `task_info(TASK_VM_INFO)`, the same value shown in Xcode's memory gauge and used by [Jetsam](https://developer.apple.com/documentation/xcode/identifying-high-memory-use-with-jetsam-event-reports) |
+| Android  | Anonymous RSS + swap (`RssAnon` + `VmSwap` from `/proc/self/status`), the same metric behind Play Console's "excessive memory usage" vitals                                                                               |
 
 ## How iOS memory footprint is calculated
 
